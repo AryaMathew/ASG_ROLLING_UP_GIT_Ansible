@@ -1,0 +1,79 @@
+---
+
+- name: "Bulding Dynamic Inventory- AutoScaling Group"
+  hosts: localhost
+  vars:
+    access_key: "AKIAYKRXFAV5ROZ7O3IF"
+    secret_key: "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"
+    region: "ap-south-1"
+    asg_name: "aws-git-asg1"
+    user: "ec2-user"
+    key: "ansible.pem"
+  tasks:
+
+    - name: "Fetching the details of Ec2"
+      ec2_instance_info:
+        aws_access_key: "{{ access_key }}"
+        aws_secret_key: "{{ secret_key }}"
+        region: "{{ region }}"
+        filters:
+          "tag:aws:autoscaling:groupName": "{{ asg_name }}"
+          instance-state-name: [ "running"]
+      register: ec2_alb
+
+    - name: "Creating Dymaic Inventory"
+      add_host:
+        name: "{{ item.public_ip_address }}"
+        groups: "alb-instance"
+        ansible_host: "{{ item.public_ip_address }}"
+        ansible_port: 22
+        ansible_user: "{{ user }}"
+        ansible_ssh_private_key_file: "{{ key }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      with_items:
+        - "{{ ec2_alb.instances }}"
+
+- name: "Deploying Updated Contents From Github"
+  hosts: alb-instance
+  become: true
+  serial: 1
+  vars:
+    health_time: 40
+    git_url: https://github.com/AryaMathew/aws-elb-site.git
+  gather_facts: false
+  tasks:
+    - name: " Cloning git repository {{ git_url }}"
+      git:
+        repo: "{{ git_url }}"
+        dest: /var/web/
+      register: git_status
+
+    - name: "Deployment - Disabling Health Check"
+      when: git_status.changed == true
+      file:
+        path: /var/www/html/health.html
+        mode: 0000
+
+    - name: "Waiting For elb to off-load Instance"
+      pause:
+        seconds: "{{ health_time }}"
+
+    - name: "Copying the new Contents To DocRoot"
+      when: git_status.changed == true
+      copy:
+        src: "/var/web/"
+        dest: "/var/www/html/"
+        owner: "apache"
+        group: "apache"
+        remote_src: true
+
+
+    - name: "Enabling Health Check"
+      when: git_status.changed == true
+      file:
+        path: /var/www/html/health.html
+        mode: 0644
+
+    - name: "Deployment - Waiting For elb to load Instance"
+      pause:
+        seconds: "{{ health_time }}"
